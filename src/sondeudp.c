@@ -35,6 +35,8 @@
 #endif
 #include <stdio.h>
 
+#include <time.h>
+
 /* demodulate RS92 sonde (2400bit/s manchester)
    and SRS-C34 (2400Bd AFSK 2000/3800Hz
    and DFM06 (2500bit/s manchester)
@@ -194,6 +196,9 @@ struct R41 {
 };
 
 //Added ------------------------------ by SQ2DK
+
+unsigned int pok=1,nok=1,cnt=1;
+
 struct PILS;
 
 struct PILS {
@@ -221,6 +226,13 @@ struct PILS {
    char synbuf[64];
    char fixbytes[56];           //not sure what for
    uint8_t fixcnt[56];
+   time_t lastfr;
+   double poklat;
+   double poklon;
+   double pokalt;
+
+
+
 //   int16_t configequalizer;
 };
 //-------------------------------------------------------
@@ -264,6 +276,7 @@ struct DFM6 {
     int sonde_typ;
     uint32_t SN6;
     uint32_t SN9;
+    uint32_t SN15;
     int yr; int mon; int day;
     int hr; int min; float sek;
     double lat; double lon; double alt;
@@ -380,6 +393,7 @@ struct CHAN {
 
    char nr;
    char freq[10];
+   char pfreq[10];
 
 };
 
@@ -429,11 +443,6 @@ static uint32_t dfmnametyp;
 
 static uint16_t CRCTAB[256];
 
-static double pils_poklat;
-
-static double pils_poklon;
-
-static double pils_pokalt;
 
 
 static void Error(char text[], uint32_t text_len)
@@ -495,8 +504,7 @@ static void initdfir(DFIRTAB dfirtab, uint32_t fg)
 } /* end initdfir() */
 
 
-static void initafir(AFIRTAB atab, uint32_t F0, uint32_t F1,
-                float eq)
+static void initafir(AFIRTAB atab, uint32_t F0, uint32_t F1, float eq)
 {
    uint32_t f;
    uint32_t i;
@@ -513,19 +521,16 @@ static void initafir(AFIRTAB atab, uint32_t F0, uint32_t F1,
    tmp = (uint32_t)X2C_TRUNCC(f10,0UL,X2C_max_longcard)+1UL;
    f = (uint32_t)X2C_TRUNCC(f00,0UL,X2C_max_longcard);
    if (f<=tmp) for (;; f++) {
-      e = 1.0f+eq*((X2C_DIVR((float)f,X2C_DIVR((float)((F0+F1)*32UL),
-                (float)adcrate)))*2.0f-1.0f);
+      e = 1.0f+eq*((X2C_DIVR((float)f,X2C_DIVR((float)((F0+F1)*32UL), (float)adcrate)))*2.0f-1.0f);
       /*
           e:=1.0 + eq*(FLOAT(f)/FLOAT((F0+F1)*AFIRLEN DIV adcrate)*2.0-1.0);
       */
       if (e<0.0f) e = 0.0f;
       if (f==(uint32_t)X2C_TRUNCC(f00,0UL,X2C_max_longcard)) {
-         e = e*(1.0f-(f00-(float)(uint32_t)X2C_TRUNCC(f00,0UL,
-                X2C_max_longcard)));
+         e = e*(1.0f-(f00-(float)(uint32_t)X2C_TRUNCC(f00,0UL,X2C_max_longcard)));
       }
       if (f==(uint32_t)X2C_TRUNCC(f10,0UL,X2C_max_longcard)+1UL) {
-         e = e*(f10-(float)(uint32_t)X2C_TRUNCC(f10,0UL,
-                X2C_max_longcard));
+         e = e*(f10-(float)(uint32_t)X2C_TRUNCC(f10,0UL, X2C_max_longcard));
       }
       /*
       IF eq<>0 THEN IO.WrFixed(e,2,2);IO.WrLn; END;
@@ -762,9 +767,10 @@ static void Config(void)
       }
       { // with
          struct PILS * anonym5 = &chan[c].pils;
-         anonym5->configbaud = 4800UL;
-         anonym5->demodbaud = (2UL*anonym5->configbaud*65536UL)/adcrate;
-         initafir(anonym5->afirtab, 0UL, 2200UL, X2C_DIVR((float)(chan[c].configequalizer),100.0f));
+         anonym5->configbaud = 4808UL;
+         anonym5->demodbaud = (2UL*anonym5->configbaud*65536UL)/adcrate; //4800
+         initafir(anonym5->afirtab, 0UL, 2200UL, X2C_DIVR((float)(chan[c].configequalizer+120),100.0f));
+//         initafir(anonym5->afirtab, 0UL, 9600UL, X2C_DIVR((float)(chan[c].configequalizer),100.0f));
          anonym5->baudfine = 0L;
          anonym5->noise = 0.0f;
          anonym5->bitlev = 0.0f;
@@ -773,6 +779,9 @@ static void Config(void)
          anonym5->rxbitc = 0UL;
          anonym5->rxbyte = 0UL;
          anonym5->synp = 0UL;
+	 anonym5->poklat=-1;
+	 anonym5->poklon=-1;
+
       }
 
 
@@ -1358,8 +1367,7 @@ static void decodeframe92(uint32_t m)
                 /* +crc */
          ++p;
          if (maxchannels>0UL) {
-            osic_WrINT32(m+1UL, 1UL);
-            osi_WrStr(":", 2ul);
+	    printf("%02i:",m+1);
          }
          osi_WrStr("R92 ", 5ul);
          if (8UL+len>240UL || !crcrs(chan[m].r92.rxbuf, 256ul, 8L,
@@ -1595,11 +1603,164 @@ static SET256 _cnst1 = {0x03FFFFF0UL,0x00000003UL,0x00000000UL,0x00000018UL,
 static void WrChan(int32_t c)
 {
    if (maxchannels>0UL) {
-      osic_WrINT32((uint32_t)(c+1L), 1UL);
-      osi_WrStr(":", 2ul);
+      printf("%02i:",c+1);
    }
 } /* end WrChan() */
 
+
+
+// Temperatur Sensor
+// NTC-Thermistor Shibaura PB5-41E
+//
+float M10get_Temp(uint32_t m) {
+// NTC-Thermistor Shibaura PB5-41E
+// T00 = 273.15 +  0.0 , R00 = 15e3
+// T25 = 273.15 + 25.0 , R25 = 5.369e3
+// B00 = 3450.0 Kelvin // 0C..100C, poor fit low temps
+// [  T/C  , R/1e3 ] ( [P__-43]/2.0 ):
+// [ -50.0 , 204.0 ]
+// [ -45.0 , 150.7 ]
+// [ -40.0 , 112.6 ]
+// [ -35.0 , 84.90 ]
+// [ -30.0 , 64.65 ]
+// [ -25.0 , 49.66 ]
+// [ -20.0 , 38.48 ]
+// [ -15.0 , 30.06 ]
+// [ -10.0 , 23.67 ]
+// [  -5.0 , 18.78 ]
+// [   0.0 , 15.00 ]
+// [   5.0 , 12.06 ]
+// [  10.0 , 9.765 ]
+// [  15.0 , 7.955 ]
+// [  20.0 , 6.515 ]
+// [  25.0 , 5.370 ]
+// [  30.0 , 4.448 ]
+// [  35.0 , 3.704 ]
+// [  40.0 , 3.100 ]
+// -> Steinhart–Hart coefficients (polyfit):
+    float p0 = 1.07303516e-03,
+          p1 = 2.41296733e-04,
+          p2 = 2.26744154e-06,
+          p3 = 6.52855181e-08;
+// T/K = 1/( p0 + p1*ln(R) + p2*ln(R)^2 + p3*ln(R)^3 )
+
+    // range/scale 0, 1, 2:                        // M10-pcb
+    float Rs[3] = { 12.1e3 ,  36.5e3 ,  475.0e3 }; // bias/series
+    float Rp[3] = { 1e20   , 330.0e3 , 3000.0e3 }; // parallel, Rp[0]=inf
+
+    uint8_t  scT;     // {0,1,2}, range/scale voltage divider
+    uint16_t ADC_RT;  // ADC12 P6.7(A7) , adr_0377h,adr_0376h
+    uint16_t Tcal[2]; // adr_1000h[scT*4]
+
+    float adc_max = 4095.0; // ADC12
+    float x, R;
+    float T = 0;    // T/Kelvin
+
+    struct M10 * anonym = &chan[m].m10;
+
+    scT     =  (unsigned char)anonym->rxbuf[0x3E]; // adr_0455h
+    ADC_RT  = ((unsigned char)anonym->rxbuf[0x40] << 8) | (unsigned char)anonym->rxbuf[0x3F];
+    ADC_RT -= 0xA000;
+    Tcal[0] = ((unsigned char)anonym->rxbuf[0x42] << 8) | (unsigned char)anonym->rxbuf[0x41];
+    Tcal[1] = ((unsigned char)anonym->rxbuf[0x44] << 8) | (unsigned char)anonym->rxbuf[0x43];
+
+    x = (adc_max-ADC_RT)/ADC_RT;  // (Vcc-Vout)/Vout
+    if (scT < 3) R =  Rs[scT] /( x - Rs[scT]/Rp[scT] );
+    else         R = -1;
+
+    if (R > 0)  T =  1/( p0 + p1*log(R) + p2*log(R)*log(R) + p3*log(R)*log(R)*log(R) );
+/*
+//    if (option_verbose >= 3 && csO) { // on-chip temperature
+        uint16_t ADC_Ti_raw = (anonym->rxbuf[0x49] << 8) | anonym->rxbuf[0x48]; // int.temp.diode, ref: 4095->1.5V
+        float vti, ti;
+        // INCH1A (temp.diode), slau144
+        vti = ADC_Ti_raw/4095.0 * 1.5; // V_REF+ = 1.5V, no calibration
+        ti = (vti-0.986)/0.00355;      // 0.986/0.00355=277.75, 1.5/4095/0.00355=0.1032
+        fprintf(stdout, "  (Ti:%.1fC)", ti);
+        // SegmentA-Calibration:
+        //ui16_t T30 = adr_10e2h; // CAL_ADC_15T30
+        //ui16_t T85 = adr_10e4h; // CAL_ADC_15T85
+        //float  tic = (ADC_Ti_raw-T30)*(85.0-30.0)/(T85-T30) + 30.0;
+        //fprintf(stdout, "  (Tic:%.1fC)", tic);
+//    }
+*/
+    return  T - 273.15; // Celsius
+}
+/*
+frame[0x32]: adr_1074h
+frame[0x33]: adr_1075h
+frame[0x34]: adr_1076h
+frame[0x35..0x37]: TBCCR1 ; relHumCap-freq
+frame[0x38]: adr_1078h
+frame[0x39]: adr_1079h
+frame[0x3A]: adr_1077h
+frame[0x3B]: adr_100Ch
+frame[0x3C..3D]: 0
+frame[0x3E]: scale_index ; scale/range-index
+frame[0x3F..40] = ADC12_A7 | 0xA000, V_R+=AVcc ; Thermistor
+frame[0x41]: adr_1000h[scale_index*4]
+frame[0x42]: adr_1000h[scale_index*4+1]
+frame[0x43]: adr_1000h[scale_index*4+2]
+frame[0x44]: adr_1000h[scale_index*4+3]
+frame[0x45..46]: ADC12_A5/4, V_R+=2.5V
+frame[0x47]: ADC12_A2/16 , V_R+=2.5V
+frame[0x48..49]: ADC12_iT, V_R+=1.5V (int.Temp.diode)
+frame[0x4C..4D]: ADC12_A6, V_R+=2.5V
+frame[0x4E..4F]: ADC12_A3, V_R+=AVcc
+frame[0x50..54]: 0;
+frame[0x55..56]: ADC12_A1, V_R+=AVcc
+frame[0x57..58]: ADC12_A0, V_R+=AVcc
+frame[0x59..5A]: ADC12_A4, V_R+=AVcc  // ntc2: R(25C)=2.2k, Rs=22.1e3 (relHumCap-Temp)
+frame[0x5B]:
+frame[0x5C]: adr_108Eh
+frame[0x5D]: adr_1082h (SN)
+frame[0x5E]: adr_1083h (SN)
+frame[0x5F]: adr_1084h (SN)
+frame[0x60]: adr_1080h (SN)
+frame[0x61]: adr_1081h (SN)
+*/
+float M10get_Tntc2(uint32_t m) {
+// SMD ntc
+    float Rs = 22.1e3;          // P5.6=Vcc
+//  float R25 = 2.2e3;
+//  float b = 3650.0;           // B/Kelvin
+//  float T25 = 25.0 + 273.15;  // T0=25C, R0=R25=5k
+// -> Steinhart–Hart coefficients (polyfit):
+    float p0 =  4.42606809e-03,
+          p1 = -6.58184309e-04,
+          p2 =  8.95735557e-05,
+          p3 = -2.84347503e-06;
+    float T = 0.0;              // T/Kelvin
+    uint16_t ADC_ntc2;            // ADC12 P6.4(A4)
+    float x, R;
+    struct M10 * anonym = &chan[m].m10;
+
+//    if (csOK)
+//    {
+        ADC_ntc2  = ((unsigned char)anonym->rxbuf[0x5A] << 8) | (unsigned char)anonym->rxbuf[0x59];
+        x = (4095.0 - ADC_ntc2)/ADC_ntc2;  // (Vcc-Vout)/Vout
+        R = Rs / x;
+        //if (R > 0)  T = 1/(1/T25 + 1/b * log(R/R25));
+        if (R > 0)  T =  1/( p0 + p1*log(R) + p2*log(R)*log(R) + p3*log(R)*log(R)*log(R) );
+//    }
+    return T - 273.15;
+}
+
+// Humidity Sensor
+// U.P.S.I.
+//
+#define FREQ_CAPCLK (8e6/2)      // 8 MHz XT2 crystal, InputDivider IDx=01 (/2)
+#define LN2         0.693147181
+#define ADR_108A    1000.0       // 0x3E8=1000
+
+float get_count_RH(uint32_t m) {  // capture 1000 rising edges
+    struct M10 * anonym = &chan[m].m10;
+    uint32_t TBCCR1_1000 = anonym->rxbuf[0x35] | (anonym->rxbuf[0x36]<<8) | (anonym->rxbuf[0x37]<<16);
+    return TBCCR1_1000 / ADR_108A;
+}
+float get_TLC555freq(uint32_t m) {
+    return FREQ_CAPCLK / get_count_RH(m);
+}
 
 
 static void decodeframe10(uint32_t m)
@@ -1617,10 +1778,13 @@ static void decodeframe10(uint32_t m)
    double alt;
    double lon;
    double lat;
+   float vbat;
+   float temp1,temp2;
    uint32_t time0;
    uint32_t id;
    char ids[201];
-   char s[201+6];
+   //char s[201+6];
+   char s[400];
    struct M10 * anonym;
    struct CHAN * anonym0; /* call if set */
    { /* with */
@@ -1628,6 +1792,7 @@ static void decodeframe10(uint32_t m)
       cs = (uint32_t)crcm10(99L, anonym->rxbuf, 101ul);
       if (cs==m10card(anonym->rxbuf, 101ul, 99L, 2L)) {
          /* crc ok */
+
          tow = m10card(anonym->rxbuf, 101ul, 10L, 4L);
          week = m10card(anonym->rxbuf, 101ul, 32L, 2L);
          time0 = tow/1000UL+week*604800UL+315964800UL;
@@ -1636,11 +1801,13 @@ static void decodeframe10(uint32_t m)
             aprsstr_DateToStr(time0, s, 201ul);
             osi_WrStr(s, 201ul);
             osi_WrStr(" ", 2ul);
-         }
-         lat = (double)m10card(anonym->rxbuf, 101ul, 14L,
-                4L)*8.3819036711397E-8;
-         lon = (double)m10card(anonym->rxbuf, 101ul, 18L,
-                4L)*8.3819036711397E-8;
+         } 
+	 temp1=M10get_Temp(m);
+	 temp2=M10get_Tntc2(m);
+	 float fq555 = get_TLC555freq(m);
+	 vbat=(float)((256*(unsigned char)anonym->rxbuf[70]+(unsigned char)anonym->rxbuf[69])*0.00668);
+         lat = (double)m10card(anonym->rxbuf, 101ul, 14L,4L)*8.3819036711397E-8;
+         lon = (double)m10card(anonym->rxbuf, 101ul, 18L,4L)*8.3819036711397E-8;
          alt = (double)m10card(anonym->rxbuf, 101ul, 22L, 4L)*0.001;
          ci = (int32_t)m10card(anonym->rxbuf, 101ul, 4L, 2L);
          if (ci>32767L) ci -= 65536L;
@@ -1652,9 +1819,10 @@ static void decodeframe10(uint32_t m)
          if (ci>32767L) ci -= 65536L;
          vv = (double)ci*0.005;
          v = (double)osic_sqrt((float)(ve*ve+vn*vn));
-                /* hor speed */
+                // hor speed
          dir = atang2(vn, ve)*5.7295779513082E+1;
          if (dir<0.0) dir = 360.0+dir;
+
 
 
     int i,j,k,l;
@@ -1677,8 +1845,8 @@ static void decodeframe10(uint32_t m)
     byte = sn_bytes[3] | (sn_bytes[4]<<8);
     sprintf(SN+3, "%1X%1u%04u", sn_bytes[0]&0xF, (byte>>13)&0x7, byte&0x1FFF);
     sprintf(ids,SN);
-
-	 ids[9U] = 0;
+    ids[9U] = 0;
+    
          /* get ID */
          if (verb) {
             WrChan((int32_t)m);
@@ -1697,36 +1865,33 @@ static void decodeframe10(uint32_t m)
             osi_WrStr("deg ", 5ul);
             osic_WrFixed((float)vv, 1L, 1UL);
             osi_WrStr("m/s ", 5ul);
+	    osic_WrFixed((float)vbat, 1L, 1UL);
+            osi_WrStr("V T1:", 6ul);
+	    osic_WrFixed((float)temp1, 1L, 1UL);
+            osi_WrStr("C T2:", 6ul);
+	    osic_WrFixed((float)temp2, 1L, 1UL);
+	    osi_WrStr("C ", 3ul);
          }
-         /* build tx frame */
-         for (i = 0UL; i<=9UL; i++) {
-            s[i+7UL] = ids[i];
-         } /* end for */
-         { /* with */
-            struct CHAN * anonym0 = &chan[m];
-            s[0U] = (char)(anonym0->mycallc/16777216UL);
-            s[1U] = (char)(anonym0->mycallc/65536UL&255UL);
-            s[2U] = (char)(anonym0->mycallc/256UL&255UL);
-            s[3U] = (char)(anonym0->mycallc&255UL);
-            if (anonym0->mycallc>0UL) s[4U] = anonym0->myssid;
-            else s[4U] = '\020';
-            s[5U] = 0;
-            s[6U] = 0;
-         }
-         for (i = 0UL; i<=100UL; i++) {
-            s[i+17UL] = anonym->rxbuf[i]; /* payload */
-         } /* end for */
-
-
-	s[118U] = chan[m].freq[0];
-	s[119U] = chan[m].freq[1];
-	s[120U] = chan[m].freq[2];
-	s[121U] = chan[m].freq[3];
-	s[122U] = chan[m].freq[4];
-	s[123U] = chan[m].freq[5];
-
-
-         alludp(chan[m].udptx, 117UL+7, s, 201ul);
+	struct CHAN * anonym0 = &chan[m];
+    	s[0U] = (char)(anonym0->mycallc/16777216UL);
+        s[1U] = (char)(anonym0->mycallc/65536UL&255UL);
+        s[2U] = (char)(anonym0->mycallc/256UL&255UL);
+        s[3U] = (char)(anonym0->mycallc&255UL);
+        if (anonym0->mycallc>0UL) s[4U] = anonym0->myssid;
+        else s[4U] = '\020';
+	s[5]=',';
+	for(i=0;i<6;i++)			//qrg
+	    s[i+6]=chan[m].freq[i];
+	s[12]=',';
+	for(i=0;i<9;i++)			//nazwa
+	    s[i+13]=ids[i];
+	s[22]=0;
+	if( lat>-90.0 && lat<90.0 && lon>=-180.0 && lon<=180.0 && alt>0.0 && alt<45000.0 && dir>=0 && dir<361 && v>=0 && v<600 && 
+		vv>-200 && vv<200 && vbat>0 && vbat<10 && temp1>-270.0 && temp1<100.0 && temp2>-270.0 && temp2<100.0){
+	    sprintf(s,"%s,%012lu,%09.5f,%010.5f,%05.0f,%03.0f,%05.1f,%05.1f,%05.2f,%06.1f,%06.1f,%06.0f\n",s,time0,lat,lon,alt,dir,v,vv,vbat,temp1,temp2,fq555);
+//	    printf("\nM10T:%s",s);	
+	    alludp(chan[m].udptx, 105, s, 105);
+	}
       }
       else if (verb) {
          /*build tx frame */
@@ -1808,8 +1973,7 @@ static void demodbit10(uint32_t m, float u, float u0)
          /*quality*/
          ua = (float)fabs(u)-anonym->bitlev;
          anonym->bitlev = anonym->bitlev+ua*0.02f;
-         anonym->noise = anonym->noise+((float)fabs(ua)-anonym->noise)
-                *0.05f;
+         anonym->noise = anonym->noise+((float)fabs(ua)-anonym->noise)*0.05f;
       }
       /*quality*/
       anonym->lastmanch = d;
@@ -1845,27 +2009,6 @@ static void demod10(float u, uint32_t m)
    }
 } /* end demod10() */
 
-static void Fsk10(uint32_t m)
-{
-   float ff;
-   int32_t lim;
-   struct M10 * anonym;
-   { /* with */
-      struct M10 * anonym = &chan[m].m10;
-      lim = (int32_t)anonym->demodbaud;
-      for (;;) {
-         if (anonym->baudfine>=65536L) {
-            anonym->baudfine -= 65536L;
-            ff = Fir(afin, (uint32_t)((anonym->baudfine&65535L)/4096L),
-                16UL, chan[m].afir, 32ul, anonym->afirtab, 512ul);
-            demod10(ff, m);
-         }
-         anonym->baudfine += lim;
-         lim = 0L;
-         if (anonym->baudfine<131072L) break;
-      }
-   }
-} /* end Fsk10() */
 
 /*---------------------- M10 */
 
@@ -1875,6 +2018,189 @@ static void Fsk10(uint32_t m)
 //-----------------------------------------------------------------------------------------------------
 //PILOTSONDE
 //-----------------------------------------------------------------------------------------------------
+
+#define EOF_INT  0x1000000
+int sample_rate = 0, bits_sample = 0;
+unsigned long sample_count = 0;
+double bitgrenze = 0;
+int wlen;
+int *sample_buff = NULL;
+int par=1, par_alt=1;
+
+int read_signed_sample(FILE *fp) {  // int = i32_t
+    int byte, i, sample, s=0;       // EOF -> 0x1000000
+
+        byte = fgetc(fp);
+        if (byte == EOF) return EOF_INT;
+        if (i == 0) sample = byte;
+
+        if (bits_sample == 16) {
+            byte = fgetc(fp);
+            if (byte == EOF) return EOF_INT;
+            if (i == 0) sample +=  byte << 8;
+        }
+
+
+    if (bits_sample ==  8)  s = sample-128;   // 8bit: 00..FF, centerpoint 0x80=128
+    if (bits_sample == 16)  s = (short)sample;
+
+    sample_count++;
+
+    return s;
+}
+
+int read_filter_sample(FILE *fp) {
+    int i;                          // wenn sample_buff[] ein 8N1-byte umfasst,
+    int s0, s, y;                   // mit (max+min)/2 Mittelwert bestimmen;
+    static int min, max;            // Glaettung durch lowpass/moving average empfohlen
+
+    s = read_signed_sample(fp);
+    if (s == EOF_INT) return EOF_INT;
+
+    sample_count--;
+
+    s0 = sample_buff[sample_count % wlen];
+    sample_buff[sample_count % wlen] = s;
+
+    y = 0;
+    if (sample_count >  wlen-1) {
+
+        if (s < min)  min = s;
+        else {
+            if (s0 <= min) {
+                min = sample_buff[0];
+                for (i = 1; i < wlen; i++) {
+                    if (sample_buff[i] < min)  min = sample_buff[i];
+                }
+            }
+        }
+
+        if (s > max)  max = s;
+        else {
+            if (s0 >= max) {
+                max = sample_buff[0];
+                for (i = 1; i < wlen; i++) {
+                    if (sample_buff[i] > max)  max = sample_buff[i];
+                }
+            }
+        }
+
+        y = sample_buff[(sample_count+wlen-1)%wlen] - (min+max)/2;
+
+    }
+    else if (sample_count == wlen-1) {
+        min = sample_buff[0];
+        max = sample_buff[0];
+        for (i = 1; i < wlen; i++) {
+            if (sample_buff[i] < min)  min = sample_buff[i];
+            if (sample_buff[i] > max)  max = sample_buff[i];
+        }
+        y = sample_buff[(sample_count+wlen-1)%wlen] - (min+max)/2;
+    }
+
+    sample_count++;
+
+    return y;
+}
+
+int read_bits_fsk(FILE *fp, int *bit, int *len,float samples_per_bit,int option_dc,int option_res,int option_inv) {
+    static int sample;
+    int n, y0;
+    float l, x1;
+    static float x0;
+
+    n = 0;
+    do{
+        y0 = sample;
+
+        if (option_dc) sample = read_filter_sample(fp);
+        else           sample = read_signed_sample(fp);
+
+        if (sample == EOF_INT) return EOF;
+        //sample_count++;
+        par_alt = par;
+        par =  (sample >= 0) ? 1 : -1;    // 8bit: 0..127,128..255 (-128..-1,0..127)
+        n++;
+    } while (par*par_alt > 0);
+
+    if (!option_res) l = (float)n / samples_per_bit;
+    else {                                 // genauere Bitlaengen-Messung
+        x1 = sample/(float)(sample-y0);    // hilft bei niedriger sample rate
+        l = (n+x0-x1) / samples_per_bit;   // meist mehr frames (nicht immer)
+        x0 = x1;
+    }
+
+    *len = (int)(l+0.5);
+
+    if (!option_inv) *bit = (1+par_alt)/2;  // oben 1, unten -1
+    else             *bit = (1-par_alt)/2;  // sdr#<rev1381?, invers: unten 1, oben -1
+// *bit = (1+inv*par_alt)/2; // ausser inv=0
+
+    /* Y-offset ? */
+
+    return 0;
+}
+
+/*
+static void decPIL(){
+
+    pos = FRAMESTART;
+
+    while (!read_bits_fsk(fp, &bit, &len)) {
+
+        if (len == 0) { // reset_frame();
+            if (pos > (pos_GPSdate+7)*BITS) {
+                for (i = pos; i < BITFRAME_LEN; i++) frame_bits[i] = 0x30 + 0;
+                print_frame(pos);//byte_count
+                header_found = 0;
+                pos = FRAMESTART;
+            }
+            //inc_bufpos();
+            //buf[bufpos] = 'x';
+            continue;   // ...
+        }
+
+        for (i = 0; i < len; i++) {
+
+            inc_bufpos();
+            buf[bufpos] = 0x30 + bit;  // Ascii
+
+            if (!header_found) {
+                header_found = compare2();
+                //if (header_found) fprintf(stdout, "[%c] ", header_found>0?'+':'-');
+                if (header_found < 0) option_inv ^= 0x1;
+                // printf("[%c] ", option_inv?'-':'+');
+            }
+            else {
+                frame_bits[pos] = 0x30 + bit;  // Ascii
+                pos++;
+
+                if (pos == BITFRAME_LEN) {
+                    print_frame(pos);//FRAME_LEN
+                    header_found = 0;
+                    pos = FRAMESTART;
+                }
+            }
+
+        }
+        if (header_found && option_b==1) {
+            bitstart = 1;
+
+            while ( pos < BITFRAME_LEN ) {
+                if (read_rawbit(fp, &bit) == EOF) break;
+                frame_bits[pos] = 0x30 + bit;
+                pos++;
+            }
+            frame_bits[pos] = '\0';
+            print_frame(pos);//FRAME_LEN
+
+            header_found = 0;
+            pos = FRAMESTART;
+        }
+    }
+
+}
+*/
 
 static void sendpils(uint32_t m)
 {
@@ -1892,12 +2218,12 @@ static void sendpils(uint32_t m)
          chan[m].pils.rxbuf[5U] = 0;
          chan[m].pils.rxbuf[6U] = 0;
 
-	 chan[m].pils.rxbuf[55U] = chan[m].freq[0];;
-	 chan[m].pils.rxbuf[56U] = chan[m].freq[1];;
-	 chan[m].pils.rxbuf[57U] = chan[m].freq[2];;
-	 chan[m].pils.rxbuf[58U] = chan[m].freq[3];;
-	 chan[m].pils.rxbuf[59U] = chan[m].freq[4];;
-	 chan[m].pils.rxbuf[60U] = chan[m].freq[5];;
+	 chan[m].pils.rxbuf[55U] = chan[m].freq[0];
+	 chan[m].pils.rxbuf[56U] = chan[m].freq[1];
+	 chan[m].pils.rxbuf[57U] = chan[m].freq[2];
+	 chan[m].pils.rxbuf[58U] = chan[m].freq[3];
+	 chan[m].pils.rxbuf[59U] = chan[m].freq[4];
+	 chan[m].pils.rxbuf[60U] = chan[m].freq[5];
       }
       alludp(chan[m].udptx, 55UL+6UL, chan[m].pils.rxbuf, 66ul);
       ///osi_WrStrLn("sending UDP data...",19UL);
@@ -1967,6 +2293,7 @@ static void demodbytepilot(uint32_t m, char d)
    double   lat;
    double   long0;
    double   heig;
+   int	    ok;
 
   
    struct PILS * anonym;
@@ -1981,16 +2308,16 @@ static void demodbytepilot(uint32_t m, char d)
          i = anonym->synp;
          ++anonym->synp;
          if (anonym->synp>39UL) anonym->synp = 0UL; 
-         j = 30UL;  //30 bytes in header (3*10)
+         j = 40UL;  //30 bytes in header (3*10)
          normc = 0UL;
          revc = 0UL;
          do {
             --j;
-            if (("001010101100101010110100000001"[j]=='1')==anonym->synbuf[i]) ++normc;
+            if (("0010101011001010101100101010110100000001"[j]=='1')==anonym->synbuf[i]) ++normc;
             else ++revc;
-            if (i==0UL) i = 29UL;
+            if (i==0UL) i = 39UL;
             else --i;
-         } while (!(j==0UL || normc>2UL && revc>2UL));
+         } while (!(j==0UL || normc>4UL && revc>4UL));
          anonym->headok = normc==0UL || revc==0UL;
          anonym->rev = normc<revc;
          if (j==0UL) {
@@ -2015,8 +2342,7 @@ static void demodbytepilot(uint32_t m, char d)
 		 crc = (anonym->rxbuf[48UL]<<8UL) | anonym->rxbuf[49UL];
 		 if (verb) {
 		    if (maxchannels>0UL) {
-                       osic_WrINT32(m+1UL, 1UL);
-                       osi_WrStr(":", 2ul);            //if more than one channel print channel No.
+			printf("%02i:",m+1);
                     }
 		    osi_WrStr("PS ",4UL);
 		 }	 
@@ -2034,49 +2360,68 @@ static void demodbytepilot(uint32_t m, char d)
 		lat=(double)getint32r(anonym->rxbuf,55UL,offs)*0.000001;
 		long0=(double)getint32r(anonym->rxbuf,55UL,offs+4UL)*0.000001;
                 heig=(double)getint32r(anonym->rxbuf,55UL,offs+8UL)*.01; 
-                
-		if (crc == crc16rev(anonym->rxbuf, 48UL)) {
-                    for (cz_1 = 49UL; cz_1>1UL; cz_1--) {anonym->rxbuf[cz_1+5UL] = anonym->rxbuf[cz_1];}   //move cells by 5 up
-		
-		    pils_poklat=lat;
-		    pils_poklon=long0;
-		    pils_pokalt=heig;
+                cnt++;
+
+
+
+		if (crc == crc16rev(anonym->rxbuf, 48UL) && lat>0 && lat<89.9 && long0>0 && long0<179.9 && heig>1 && heig<35000) {
+		    anonym->poklat=lat;
+		    anonym->poklon=long0;
+		    anonym->pokalt=heig;
+		    anonym->lastfr=time(NULL);
   		    //if (verb) osi_WrStr(" CRC [OK+] ",12UL);
             	    if  (verb) {             //if more verbous print lat/long/h
+			pok++;
 			osi_WrStrLn("",0UL);
 			osi_WrStr(" Lat=",5ul);
-			osic_WrFixed((float)(lat), 5L, 1UL);
+			osic_WrFixed((float)(lat), 6L, 1UL);
 			osi_WrStr(" Long=", 6ul);
-			osic_WrFixed((float)(long0), 5L, 1UL);
+			osic_WrFixed((float)(long0), 6L, 1UL);
 			osi_WrStr(" height=", 9ul);
 			osic_WrFixed((float)heig, 1L, 1UL);
 			osi_WrStrLn("m ", 3ul);
+			printf("BR: %li:%li\r\n",anonym->configbaud,anonym->baudfine);
 		    }
-
-		    sendpils(m);    //send data to udp port - our job here is done.
+                    for (cz_1 = 49UL; cz_1>1UL; cz_1--) {anonym->rxbuf[cz_1+5UL] = anonym->rxbuf[cz_1];}   //move cells by 5 up
+		    sendpils(m);    
 		}   //crc ok
 		else {
 	    	    if (verb) osi_WrStrLn(" parity error",14UL);
 		    //if position not too far from last good one....
-		    if ((fabs(pils_poklat-lat)<0.1f) && (fabs(pils_poklon-long0)<0.1f) && (abs(pils_pokalt-heig)<500)) {
+
+		    ok=0;
+		    if(time(NULL)-anonym->lastfr<=60){
+			if ((fabs(anonym->poklat-lat)<0.003f) && (fabs(anonym->poklon-long0)<0.003f) && (abs(anonym->pokalt-heig)<1500)) 
+			    ok=1;
+		    }else if ((time(NULL)-anonym->lastfr>60) && (time(NULL)-anonym->lastfr<=1800)){
+			if ((fabs(anonym->poklat-lat)<0.03f) && (fabs(anonym->poklon-long0)<0.03f) && (abs(anonym->pokalt-heig)<4500)) 
+			    ok=1;
+		    }
+    
+		    if (ok || (anonym->poklat==-1 && anonym->poklon==-1 && lat>0 && lat<89.9 && long0>0 && long0<179.9 && heig>1 && heig<35000)) {
+
+			anonym->poklat=(lat+anonym->poklat)/2;
+			anonym->poklon=(long0+anonym->poklon)/2;
+			anonym->pokalt=(heig+anonym->pokalt)/2;
+			anonym->lastfr=time(NULL);
+
 			if (verb) {
+			    nok++;
 		    	    osi_WrStr(" !Lat=",6ul);
-		    	    osic_WrFixed((float)(lat), 5L, 1UL);
+		    	    osic_WrFixed((float)(lat), 6L, 1UL);
 		    	    osi_WrStr(" !Long=", 7ul);
-		    	    osic_WrFixed((float)(long0), 5L, 1UL);
+		    	    osic_WrFixed((float)(long0), 6L, 1UL);
 		    	    osi_WrStr(" !height=", 10ul);
 		    	    osic_WrFixed((float)heig, 1L, 1UL);
-		    	    osi_WrStrLn("m ", 3ul);
+		    	    osi_WrStr("m ", 3ul);
+			    printf("***BR: %li:%li\r\n",anonym->configbaud,anonym->baudfine);
 		        }
 
-		/*	for (cz_1 = 15UL; cz_1<50; cz_1++) {anonym->rxbuf[cz_1]=0UL;}   //fill in not relevant data with 0
-			crc=crc16rev(anonym->rxbuf, 48UL);  //calculate new checksum
-			anonym->rxbuf[49UL]=(crc&255UL);
-			anonym->rxbuf[48UL]=(crc>>8UL);*/
 			for (cz_1 = 49UL; cz_1>1UL; cz_1--) {anonym->rxbuf[cz_1+5UL] = anonym->rxbuf[cz_1];}   //move cells by 5 up
 			sendpils(m); //send data to sondemod
 		   }
 		}
+//		printf("OK: %u, NOK:%u, CNT:%u  CAL:%u\r\n",pok,nok,cnt,(unsigned int)(100*pok/nok));
             }
 	    
             if (anonym->rxp==48UL) {              
@@ -2358,8 +2703,7 @@ static void decode41(uint32_t m)
       } while (!(allok || try0>2UL));
       if (verb && nameok>0UL) {
          if (maxchannels>0UL) {
-            osic_WrINT32(m+1UL, 1UL);
-            osi_WrStr(":", 2ul);
+	      printf("%02i:",m+1);
          }
          osi_WrStr("R41 ", 5ul);
          for (i = 0UL; i<=7UL; i++) {
@@ -2399,6 +2743,7 @@ static void decode41(uint32_t m)
          }
          Wrtune(chan[m].adcdc, chan[m].adcmax);
          osi_WrStrLn("", 1ul);
+	// printf("BR: %li:%li\r\n",anonym->configbaud,anonym->baudfine);
       }
    }
    if (nameok>0UL) sendrs41(m);
@@ -2713,7 +3058,7 @@ static void FskPS(uint32_t m)
    float ff;
    int32_t lim;
    struct PILS * anonym;
-   { /* with */
+   { 
       struct PILS * anonym = &chan[m].pils;
       lim = (int32_t)anonym->demodbaud;
       for (;;) {
@@ -2727,8 +3072,29 @@ static void FskPS(uint32_t m)
          if (anonym->baudfine<131072L) break;
       }
    }
-} /* end Fsk() */
+} // end Fsk() 
 
+
+static void Fsk10(uint32_t m)
+{
+   float ff;
+   int32_t lim;
+   struct M10 * anonym;
+   { /* with */
+      struct M10 * anonym = &chan[m].m10;
+      lim = (int32_t)anonym->demodbaud;
+      for (;;) {
+         if (anonym->baudfine>=65536L) {
+            anonym->baudfine -= 65536L;
+            ff = Fir(afin, (uint32_t)((anonym->baudfine&65535L)/4096L), 16UL, chan[m].afir, 32ul, anonym->afirtab, 512ul);
+            demod10(ff, m);
+         }
+         anonym->baudfine += lim;
+         lim = 0L;
+         if (anonym->baudfine<131072L) break;
+      }
+   }
+} /* end Fsk10() */
 
 
 /*------------------------------ DFM06 */
@@ -2770,8 +3136,7 @@ static char hamcorr(char b[], uint32_t b_len, uint32_t d,
 } /* end hamcorr() */
 
 
-static char hamming(const char b[], uint32_t b_len,
-                uint32_t len, char db[], uint32_t db_len)
+static char hamming(const char b[], uint32_t b_len, uint32_t len, char db[], uint32_t db_len)
 {
    uint32_t j;
    uint32_t i;
@@ -3101,32 +3466,72 @@ float get_Temp2(float *meas) { // meas[0..4]
     R = (f-f1)/g;                    // meas[0,3,4] > 0 ?
     if (R > 0)  T = 1/(1/T0 + 1/BB0 * log(R/R0));
 
-//    if (option_ptu && option_verbose == 2) {
-        printf("  (Rso: %.1f , Rb: %.1f)", Rs_o/1e3, Rb/1e3);
-//    }
+    //printf("  (Rso: %.1f , Rb: %.1f)", Rs_o/1e3, Rb/1e3);
 
     return  T - 273.15;
 //  DFM-06: meas20 * 16 = meas24
 }
 
+float get_Temp4(float *meas) { // meas[0..4]
+// NTC-Thermistor EPCOS B57540G0502
+// [  T/C  ,   R/R25   , alpha ] :
+// [ -55.0 ,  51.991   ,   6.4 ]
+// [ -50.0 ,  37.989   ,   6.2 ]
+// [ -45.0 ,  28.07    ,   5.9 ]
+// [ -40.0 ,  20.96    ,   5.7 ]
+// [ -35.0 ,  15.809   ,   5.5 ]
+// [ -30.0 ,  12.037   ,   5.4 ]
+// [ -25.0 ,   9.2484  ,   5.2 ]
+// [ -20.0 ,   7.1668  ,   5.0 ]
+// [ -15.0 ,   5.5993  ,   4.9 ]
+// [ -10.0 ,   4.4087  ,   4.7 ]
+// [  -5.0 ,   3.4971  ,   4.6 ]
+// [   0.0 ,   2.7936  ,   4.4 ]
+// [   5.0 ,   2.2468  ,   4.3 ]
+// [  10.0 ,   1.8187  ,   4.2 ]
+// [  15.0 ,   1.4813  ,   4.0 ]
+// [  20.0 ,   1.2136  ,   3.9 ]
+// [  25.0 ,   1.0000  ,   3.8 ]
+// [  30.0 ,   0.82845 ,   3.7 ]
+// [  35.0 ,   0.68991 ,   3.6 ]
+// [  40.0 ,   0.57742 ,   3.5 ]
+// -> Steinhart–Hart coefficients (polyfit):
+    float p0 = 1.09698417e-03,
+          p1 = 2.39564629e-04,
+          p2 = 2.48821437e-06,
+          p3 = 5.84354921e-08;
+// T/K = 1/( p0 + p1*ln(R) + p2*ln(R)^2 + p3*ln(R)^3 )
+    float Rf = 220e3;    // Rf = 220k
+    float g = meas[4]/Rf;
+    float R = (meas[0]-meas[3]) / g; // meas[0,3,4] > 0 ?
+    float T = 0; // T/Kelvin
+    if (R > 0)  T = 1/( p0 + p1*log(R) + p2*log(R)*log(R) + p3*log(R)*log(R)*log(R) );
+    return  T - 273.15; // Celsius
+//  DFM-06: meas20 * 16 = meas24
+//      -> (meas24[0]-meas24[3])/meas24[4]=(meas20[0]-meas20[3])/meas20[4]
+}
 
-#define SNbit 0x0100
+
+#define RSNbit 0x0100  // radiosonde DFM-06,DFM-09
+#define PSNbit 0x0200  // pilotsonde PS-15
+
 int conf_out(uint8_t *conf_bits,uint32_t m) {
     int conf_id;
     int ret = 0;
     int val, hl;
     static int chAbit, chA[2];
-    uint32_t SN6, SN9;
+    uint32_t SN6, SN9, SN15;
+    static int ch7bit, ch7[2];
 
     conf_id = bits2val(conf_bits, 4);
 
-    //if (conf_id > 6) chan[m].dfm6.SN6 = 0;  //// gpx.sonde_typ & 0xF = 9; // SNbit?
 
     if ((chan[m].dfm6.sonde_typ & 0xFF) < 9  &&  conf_id == 6) {
         SN6 = bits2val(conf_bits+4, 4*6);  // DFM-06: Kanal 6
-        if ( SN6 == chan[m].dfm6.SN6 ) {            // nur Nibble-Werte 0..9
-            chan[m].dfm6.sonde_typ = SNbit | 6;
+        if ( SN6 == chan[m].dfm6.SN6 &&  SN6 != 0) {            // nur Nibble-Werte 0..9
+            chan[m].dfm6.sonde_typ = RSNbit | 6;
             ret = 6;
+//	    printf("DFM6\n");
         }
         else {
             chan[m].dfm6.sonde_typ = 0;
@@ -3141,8 +3546,9 @@ int conf_out(uint8_t *conf_bits,uint32_t m) {
         if (chAbit == 3) {  // DFM-09: Kanal A
             SN9 = (chA[1] << 16) | chA[0];
             if ( SN9 == chan[m].dfm6.SN9 ) {
-                chan[m].dfm6.sonde_typ = SNbit | 9;
+                chan[m].dfm6.sonde_typ = RSNbit | 9;
                 ret = 9;
+//		printf("DFM9\n");
             }
             else {
                 chan[m].dfm6.sonde_typ = 0;
@@ -3152,6 +3558,24 @@ int conf_out(uint8_t *conf_bits,uint32_t m) {
         }
     }
 
+    if (conf_id == 0x7) {  // 0x70xxxxy
+        val = bits2val(conf_bits+8, 4*5);
+        hl =  (val & 1) == 0;
+        ch7[hl] = (val >> 4) & 0xFFFF;
+        ch7bit |= 1 << hl;
+        if (ch7bit == 3) {  // PS-15: Kanal 7
+            SN15 = (ch7[1] << 16) | ch7[0];
+            if ( SN15 == chan[m].dfm6.SN15 ) {
+                chan[m].dfm6.sonde_typ = PSNbit | 15;
+                ret = 15;
+            }
+            else {
+                chan[m].dfm6.sonde_typ = 0;
+            }
+            chan[m].dfm6.SN15 = SN15;
+            ch7bit = 0;
+        }
+    }
     if (conf_id >= 0 && conf_id <= 4) {
         val = bits2val(conf_bits+4, 4*6);
         chan[m].dfm6.meas24[conf_id] = fl24(val);
@@ -3182,7 +3606,7 @@ void print_gpx(uint32_t m) {
   int i, j;
     char typp;
 
-          if (chan[m].dfm6.sonde_typ & SNbit)
+          if (chan[m].dfm6.sonde_typ & RSNbit)
           {
               if ((chan[m].dfm6.sonde_typ & 0xFF) == 6) {
 		  sprintf(chan[m].dfm6.id,"D6%06X", chan[m].dfm6.SN6);
@@ -3192,13 +3616,20 @@ void print_gpx(uint32_t m) {
 		  sprintf(chan[m].dfm6.id,"D9%06u", chan[m].dfm6.SN9);
 		    typp='9';
               }
-              chan[m].dfm6.sonde_typ ^= SNbit;
+              chan[m].dfm6.sonde_typ ^= RSNbit;
           }
-
-	  if((chan[m].dfm6.id[0]!='D')||(chan[m].dfm6.id[1]!='6')&&(chan[m].dfm6.id[1]!='9'))
+	  if (chan[m].dfm6.sonde_typ & PSNbit) {
+                  if ((chan[m].dfm6.sonde_typ & 0xFF) == 15) {
+		      sprintf(chan[m].dfm6.id,"DF%06u", chan[m].dfm6.SN15);
+		      typp='F';
+                  }
+                  chan[m].dfm6.sonde_typ ^= PSNbit;
+          }
+	
+	  if((chan[m].dfm6.id[0]!='D')||(chan[m].dfm6.id[1]!='6')&&(chan[m].dfm6.id[1]!='9')&&(chan[m].dfm6.id[1]!='F'))
 	    chan[m].dfm6.id[0]=0;
 	
-          printf("%d:DFM %s ",m+1,chan[m].dfm6.id+2);
+          printf("%02d:DFM %s ",m+1,chan[m].dfm6.id+2); 
           printf("[%3d] ", chan[m].dfm6.frnr);
           printf("lat: %.6f ", chan[m].dfm6.lat);
           printf("lon: %.6f ", chan[m].dfm6.lon);
@@ -3207,7 +3638,9 @@ void print_gpx(uint32_t m) {
           printf("D: %5.1f ", chan[m].dfm6.dir);
           printf("vV: %5.2f ", chan[m].dfm6.vertV);
           float t = get_Temp(chan[m].dfm6.meas24);
+	  float t4 = get_Temp4(chan[m].dfm6.meas24);
           if (t > -270.0) printf("T=%.1fC ", t);
+          if (t4 > -270.0) printf("T4=%.1fC ", t4);
           if ((chan[m].dfm6.sonde_typ & 0xFF) == 9) {
               printf("U: %.2fV ", chan[m].dfm6.status[0]);
               printf("Ti: %.2fC ", chan[m].dfm6.status[1]-270.0);
@@ -3220,12 +3653,18 @@ static char sendDFM(uint32_t m){
     char tmp[50];
     char ret=0;
     s[0]=0;
+    char i;
+    
     if (strlen(chan[m].dfm6.id)>5){
+
         if ((chan[m].dfm6.sonde_typ & 0xFF) == 6) 
           sprintf(tmp,"D6%08X", chan[m].dfm6.SN6);
         if ((chan[m].dfm6.sonde_typ & 0xFF) == 9) 
           sprintf(tmp,"D9%08u", chan[m].dfm6.SN9);
 	tmp[10]=0;
+	for(i=2;i<10;i++)
+	    if(tmp[i]<48 || tmp[i]>57)
+		return -1; 
 	strcat(s,tmp);
 
 	sprintf(tmp,"%04d", chan[m].dfm6.frnr);
@@ -3257,20 +3696,26 @@ static char sendDFM(uint32_t m){
         tmp[4] = chan[m].freq[4];
         tmp[5] = chan[m].freq[5];
 	tmp[6] = 0;
-	strcat(s,tmp);
 
-        float t = get_Temp(chan[m].dfm6.meas24);
-        if (t > -270.0) sprintf(tmp,"%04.0f", (t+273)*10);
+	if(strlen(tmp)>2)
+	    strcat(s,tmp);
+	else
+	    strcat(s,"000000");
+
+        float t = get_Temp(chan[m].dfm6.meas24);	
+        if (t > -270.0) {
+	    sprintf(tmp,"%04.0f", (t+273)*10);
+	    tmp[4]=0;
+	}
 	else sprintf(tmp,"0000");
 	strcat(s,tmp);
 
-        if ((chan[m].dfm6.sonde_typ & 0xFF) == 9) {
-            sprintf(tmp,"%04.0f", chan[m].dfm6.status[0]*100);	// u
+        if ((chan[m].dfm6.sonde_typ & 0xFF) == 9) {				
+            sprintf(tmp,"%04.0f", chan[m].dfm6.status[0]*100);	
 	    tmp[4]=0;
 	    strcat(s,tmp);
-            sprintf(tmp,"%05.0f", chan[m].dfm6.status[1]*100);	// t
+            sprintf(tmp,"%05.0f", chan[m].dfm6.status[1]*100);	
 	    tmp[5]=0;
-	    strcat(s,tmp);
         }
 	else sprintf(tmp,"000000000");
 	strcat(s,tmp);
@@ -3279,7 +3724,15 @@ static char sendDFM(uint32_t m){
         tmp[16]=0;
         strcat(s,tmp);
 
-	alludp(chan[m].udptx, 88, s, 88);
+        tmp[0] = (char)(chan[m].mycallc/16777216UL);
+        tmp[1] = (char)(chan[m].mycallc/65536UL&255UL);
+        tmp[2] = (char)(chan[m].mycallc/256UL&255UL);
+        tmp[3] = (char)(chan[m].mycallc&255UL);
+        if (chan[m].mycallc>0UL) tmp[4] = chan[m].myssid;
+	else tmp[4] = '\020';
+	strcat(s,tmp);
+
+	alludp(chan[m].udptx, 88+5, s, 88+5);
 
     }
 
@@ -3317,6 +3770,18 @@ static void decodeframe6(uint32_t m)
 	anonym->lastsent=osic_time();
 	chan[m].dfm6.id[0]=0;
       }
+
+      if(chan[m].dfm6.newsonde==0){
+	for(i=0;i<6;i++)
+	    if(chan[m].freq[0]!=chan[m].pfreq[0])
+		chan[m].dfm6.newsonde=1;
+      }
+
+      if(chan[m].dfm6.newsonde){
+	for(i=0;i<6;i++)
+	    chan[m].pfreq[0]=chan[m].freq[0];
+      }
+
       if(ret2>0)
           conf_out(anonym->cb,m);
       if(ret0>0){
@@ -3482,8 +3947,7 @@ static void demodframe34(uint32_t channel)
       }
       if (verb && ok0 || verb2) {
          if (maxchannels>0UL) {
-            osic_WrINT32(channel+1UL, 1UL);
-            osi_WrStr(":", 2ul);
+	    printf("%02i:",channel+1);
          }
          if (anonym->c50) {
             osi_WrStr("C50 ", 5ul);
@@ -4011,13 +4475,16 @@ static void getadc(void)
 
 	 sprintf(tmps,"%c%c%c%c\n",adcbuf[0],adcbuf[1],adcbuf[2],adcbuf[3]);
 	 
+
 	 if(tmps[0]=='9' && tmps[1]=='S' && tmps[2]=='K' && tmps[3]=='P'){ //freq table
-	    printf("Update channel table\n");
+	    //printf("Update channel table\n");
 	    pos=4;
 	    mod=1;
             chno=0;
 	    while(adcbuf[pos]!=0){
-		//chan[chno].nr=(adcbuf[pos]-48)*10+adcbuf[pos+1]-48;
+		chno=(int)(((char)adcbuf[pos]-48)*10+((char)adcbuf[pos+1]-48)-1);
+		if(chno<0) break;
+
 		chan[chno].freq[0]=adcbuf[pos+2];
 		chan[chno].freq[1]=adcbuf[pos+3];
 		chan[chno].freq[2]=adcbuf[pos+4];
@@ -4026,8 +4493,8 @@ static void getadc(void)
 		chan[chno].freq[5]=adcbuf[pos+7];
 		chan[chno].freq[6]=0;
 		pos+=8;
+		//printf("CH:%i QRG:",chno);
 		//printf(chan[chno].freq);printf("\n");
-		chno++;
 	    }
 	 }else if(mod==0){
              adcbufsamps = 0UL;
@@ -4064,13 +4531,14 @@ static void getadc(void)
         	ch = (adcbufrd-adcbufsampx)-1UL;
         	/*WrInt(ch, 1); WrStrLn(" ch"); */
         	if (ch<63UL) {
-            	    if (verb && maxchannels!=ch && mod==0) {
+/*            	    if (verb && maxchannels!=ch && mod==0) {
                 	osi_WrStr("channels changed from ", 23ul);
                 	osic_WrINT32(maxchannels+1UL, 0UL);
                 	osi_WrStr(" to ", 5ul);
                 	osic_WrINT32(ch+1UL, 0UL);
                 	osi_WrStrLn("", 1ul);
                     }
+*/
             	    maxchannels = ch;
         	}
             }
